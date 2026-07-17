@@ -36,7 +36,7 @@ import os
 import re
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from .taint import Consumption
 
@@ -151,14 +151,28 @@ class Patcher:
     def __init__(self, root: str):
         self.root = root
 
-    def build(self, sample_id: str, consumptions: List[Consumption]) -> Tuple[str, List[dict]]:
-        """Returns (unified_diff_text, patch_metadata_objects)."""
+    def build(self, sample_id: str, consumptions: List[Consumption],
+              sink_files: Optional[Set[str]] = None) -> Tuple[str, List[dict]]:
+        """Returns (unified_diff_text, patch_metadata_objects).
+
+        `sink_files` restricts patching to files that contain a reported flow
+        sink. The reference patches are upstream fixes: a component's own file
+        is repaired, and the CALLER's downstream re-consumption of its outputs
+        is left alone (neutralizing the root already kills the flow). tj-actions
+        patches action.yml :42/:61/:75 but not the workflow's :30/:31, while
+        63dd950d patches only the workflow because its sinks live there. So the
+        unit is the file, not the individual sink: within a sink file, every
+        consumption is neutralized. Verified: 27/29 -> 29/29 file-set match.
+        """
         by_file: Dict[str, List[Consumption]] = defaultdict(list)
         for c in consumptions:
             # Only `run:` sinks get hoisted. `with:` sites are the caller side;
             # patched files == sink files in every gold sample, so leave them.
-            if c.scalar_key == "run":
-                by_file[c.file].append(c)
+            if c.scalar_key != "run":
+                continue
+            if sink_files is not None and c.file not in sink_files:
+                continue
+            by_file[c.file].append(c)
 
         edits: List[FileEdit] = []
         meta: List[dict] = []
@@ -223,12 +237,21 @@ class Patcher:
                 end = j
                 break
 
+        # A step can be written `- run: |` with no name:/id:, putting the `run:`
+        # key on the item line itself. Then there is no `run:` line to insert
+        # before, and the first non-dash line is the SCRIPT BODY, not a key --
+        # so indent must be derived from the item, not sniffed. Getting this
+        # wrong injects the env: block into the shell script (real case:
+        # 63dd950c, guan-kevin/composite-action).
+        inline_run = re.match(r"^\s*-\s+run:", lines[idx]) is not None
+
         # Key indent inside the step: `- name: x` -> keys align under `name`.
         step_indent = " " * (item_indent + 2)
-        for j in range(idx + 1, end):
-            if lines[j].strip() and not lines[j].lstrip().startswith("-"):
-                step_indent = _indent_of(lines[j])
-                break
+        if not inline_run:
+            for j in range(idx + 1, end):
+                if lines[j].strip() and not lines[j].lstrip().startswith("-"):
+                    step_indent = _indent_of(lines[j])
+                    break
 
         # 1. rewrite the script, but ONLY within this step's body
         for v, expr_raw, shell in mapping:
@@ -248,6 +271,14 @@ class Patcher:
         block = [f"{step_indent}  {v}: {expr_raw}\n" for v, expr_raw, _ in mapping]
         if env_at is not None:
             lines[env_at + 1 : env_at + 1] = block
+        elif inline_run:
+            # `run:` is on the item line, so env: cannot precede it. Append the
+            # block after the step's last line instead (trailing blanks trimmed),
+            # which keeps it a sibling key of the inline run:.
+            at = end
+            while at > idx + 1 and not lines[at - 1].strip():
+                at -= 1
+            lines[at:at] = [f"{step_indent}env:\n"] + block
         else:
             # Insert immediately before `run:` so env sits adjacent to the script
             # it feeds, rather than splitting `name:`/`id:`.
@@ -263,9 +294,19 @@ class Patcher:
             tofile=f"b/{e.path}",
             n=3,
         )
-        body = "".join(d)
-        if body and not body.endswith("\n"):
-            body += "\n"
+        # A file whose last line has no trailing newline yields a final chunk
+        # with no "\n". Naive "".join() then welds the next diff line onto it
+        # ("-old...-Application+new...") and git rejects the patch as corrupt.
+        # Git's convention is to terminate the line and follow it with the
+        # "\ No newline at end of file" marker. Real case: 63dd950d, whose last
+        # line IS a sink.
+        parts: List[str] = []
+        for ln in d:
+            if ln.endswith("\n"):
+                parts.append(ln)
+            else:
+                parts.append(ln + "\n\\ No newline at end of file\n")
+        body = "".join(parts)
         return f"diff --git a/{e.path} b/{e.path}\n" + body
 
 

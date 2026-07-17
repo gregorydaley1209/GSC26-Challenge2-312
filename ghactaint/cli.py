@@ -61,7 +61,8 @@ def main(argv=None):
         if res.flows:
             n_vuln += 1
             vulns = [f.to_json() for f in res.flows]
-            diff, meta = patcher.build(sid, res.consumptions)
+            sink_files = {f.dst.file for f in res.flows}
+            diff, meta = patcher.build(sid, res.consumptions, sink_files=sink_files)
             if diff:
                 if not a.no_verify:
                     vr = V.verify(a.root, diff, sid, analyzer, split=a.split)

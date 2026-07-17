@@ -205,3 +205,39 @@ def test_dash_heredoc_quoted():
 def test_expr_after_heredoc_closes_is_a_sink():
     s = "cat <<'EOF'\nplain\nEOF\necho ${{ github.head_ref }}"
     assert not in_spans(find_expressions(s)[0].start, literal_heredoc_spans(s))
+
+
+# ---- patch generation regressions (both found by gate 4 on real data,
+#      neither reachable from the fixture) -------------------------------
+
+def test_no_trailing_newline_emits_marker_and_keeps_both_lines():
+    """63dd950d: last line is a sink and the file has no trailing newline.
+    Naive join() welds the next '+' onto the final '-' line -> corrupt patch."""
+    from ghactaint.patch import Patcher, FileEdit
+    e = FileEdit(path="w.yml", original="a: 1\nb: 2", patched="a: 1\nb: 3")
+    d = Patcher(root="/tmp")._diff(e)
+    assert "\\ No newline at end of file" in d
+    for ln in d.splitlines():
+        assert not (ln.startswith("-") and "+" in ln[1:] and "b: 3" in ln), \
+            "a '+' line got welded onto a '-' line"
+    assert any(ln.startswith("+") and "b: 3" in ln for ln in d.splitlines())
+
+
+def test_inline_run_step_does_not_get_env_inside_script():
+    """63dd950c: `- run: |` puts run: on the item line. The env: block must not
+    land in the shell script, and indent must come from the item, not the body."""
+    from ghactaint.patch import Patcher
+    lines = [
+        "  steps:\n",
+        "    - run: |\n",
+        "        echo \"x: ${{ github.head_ref }}\"\n",
+        "      shell: bash\n",
+    ]
+    out = Patcher(root="/tmp")._apply_step(
+        lines, 2, [("HEAD_REF", "${{ github.head_ref }}", "bash")])
+    text = "".join(out)
+    ei = next(i for i, l in enumerate(out) if l.strip() == "env:")
+    si = next(i for i, l in enumerate(out) if l.strip().startswith("echo"))
+    assert ei > si, "env: was inserted into the run: script body"
+    assert out[ei].startswith("      env:"), f"wrong indent: {out[ei]!r}"
+    assert "${HEAD_REF}" in text and "${{ github.head_ref }}" in text
