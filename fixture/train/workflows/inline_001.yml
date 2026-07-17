@@ -1,0 +1,8 @@
+name: inline
+on: [pull_request_target]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Bad
+        run: echo "branch ${{ github.head_ref }}"

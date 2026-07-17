@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# never commit credentials -- the OpenRouter team key is read from the
+# environment at runtime (os.environ), never from a file in this repo.
+.env
+.env.*
+*.key
+*_key.txt
+secrets*

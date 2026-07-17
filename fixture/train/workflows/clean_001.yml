@@ -1,0 +1,8 @@
+name: clean
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Echo trusted
+        run: echo "ref is ${{ github.ref }} sha ${{ github.sha }}"

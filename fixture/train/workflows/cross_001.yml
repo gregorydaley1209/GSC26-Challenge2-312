@@ -1,0 +1,11 @@
+name: cross
+on: [issues]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call action
+        uses: acme/greet@aaaaaaaaaaaabbbbbbbbbbbbccccccccccccdddd
+        with:
+          title: ${{ github.event.issue.title }}
+          safe: ${{ github.repository }}

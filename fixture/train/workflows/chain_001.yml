@@ -1,0 +1,12 @@
+name: chain
+on: [pull_request_target]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Root sink
+        id: a
+        run: |
+          echo "ref=${{ github.head_ref }}" >> $GITHUB_OUTPUT
+      - name: Downstream re-consumption
+        run: echo "again ${{ steps.a.outputs.ref }}"
