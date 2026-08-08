@@ -514,6 +514,7 @@ class Analyzer:
             for ex in E.find_expressions(pos.text):
                 tv = self._eval_expr(ex, scope)
                 merged.sources |= tv.sources
+                merged.derived = merged.derived or tv.derived   # keep $GITHUB_ENV/OUTPUT-crossed flag
                 merged.parents.append(tv)
                 merged.origin = merged.origin or tv.origin or Site(
                     d.path, d.key_line(em, k) or pos.line, sorted(tv.sources)[0] if tv.sources else ""
