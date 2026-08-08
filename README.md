@@ -1,169 +1,142 @@
 # ghactaint — IEEE GSC Challenge 02
 
 Detect and repair code-injection vulnerabilities in GitHub Actions workflows.
-Deterministic taint analysis + env-hoist repair + self-verification.
+Deterministic taint analysis + env-hoist repair + self-verification. Dataset and
+task: https://www.kaggle.com/competitions/detect-and-fix-vulnerabilities-in-github-actions
 
 ## Install
 
 ```bash
 pip install ruamel.yaml pytest
-# optional but recommended (verify gate 3):
-#   https://github.com/rhysd/actionlint
+# optional (verify gate 3 only): actionlint  -> https://github.com/rhysd/actionlint
 ```
+
+Dependencies: `ruamel.yaml` (required, round-trip YAML with source positions),
+`pytest` (tests), `actionlint` (optional).
+
+### Python version — 3.9.7, invoked explicitly
+
+Developed and run on **Python 3.9.7**. The pipeline imports `ruamel.yaml`, so it
+must be invoked with the interpreter that has the dependencies installed. On this
+machine that interpreter is:
+
+```
+%LOCALAPPDATA%\Programs\Python\Python39\python.exe
+```
+
+A bare `python` on PATH points at a different install (Python 3.12) that does
+**not** have `ruamel.yaml`, so `python -m ghactaint.cli ...` there fails at import
+with `ModuleNotFoundError: ruamel`. Always call the 3.9 interpreter that has the
+deps (or `pip install ruamel.yaml pytest` into whatever interpreter you use).
 
 ## Run
 
 ```bash
+PY="%LOCALAPPDATA%\Programs\Python\Python39\python.exe"   # the interpreter with ruamel.yaml
+
 # 1. unit tests (no dataset needed)
-python -m pytest tests/ -q
+"$PY" -m pytest tests/ -q
 
 # 2. eval harness self-test
-python eval.py --self-test
-python eval.py --baseline null            # the bar: 80.7% acc, 0.0 detection F1
+"$PY" eval.py --self-test
 
 # 3. end-to-end on the synthetic fixture
-python -m ghactaint.cli --root fixture --split train --out /tmp/fx
+"$PY" -m ghactaint.cli --root fixture --split train --out /tmp/fx
 
-# 4. line-convention sweep (RESOLVED: expr — kept for reproducibility)
-for m in expr run-key step-start; do
-  python -m ghactaint.cli --root DATASET --split train --out /tmp/$m --sink-line-mode $m
-  echo "== $m"; python eval.py --gold train.csv --pred /tmp/$m/train.csv | grep -A6 'FLOW-LEVEL'
-done
+# 4. score detection against a labeled split
+"$PY" -m ghactaint.cli --root DATASET --split train --out out_train
+"$PY" eval.py --gold DATASET/train.csv --pred out_train/train.csv
 
-# 5. final artifact shape (what organizers run)
-python -m ghactaint.cli --root DATASET --split test --out .
-#   -> test.csv + patches/<sample_id>.patch
+# 5. FINAL artifact (what the organizers run)
+"$PY" -m ghactaint.cli --root DATASET --split test --out .
+#   -> test.csv  +  patches/<sample_id>.patch
 ```
 
-## Findings from train.csv (confirmed, not assumed)
+`--root` is the extracted dataset root (containing `train/`, `validation/`,
+`test/`, and `untrusted_data.csv`). `<split>.csv` has columns
+`sample_id,vulnerabilities,patches`; one patch file per vulnerable sample at
+`patches/<sample_id>.patch` (a single git-apply-compatible unified diff, possibly
+multi-file). `--untrusted` defaults to `<root>/untrusted_data.csv`.
 
-| Fact | Value |
-|---|---|
-| Samples | 150 — **29 vulnerable (19.3%)**, 121 clean |
-| Total flows | 56 |
-| Null baseline | **80.7% accuracy, 0.0 detection F1** |
-| `from == to` | 39/56 (direct inline interpolation) |
-| Cross-file flows | 4/56 |
-| Untrusted sources | **27** (4 use `[*]` wildcard indices) |
-| **Reference patch strategy** | **env-hoist, 36/36 — zero exceptions** |
-| Patch files per sample | exactly 1: `patches/<sample_id>.patch`, multi-file diff |
-| Patched files vs sink files | identical, 0/29 exceptions |
+## LLM / API disclosure
 
-Two consequences that shape the whole design:
+**Zero LLM calls. No API key required.** The pipeline is fully deterministic:
+detection is static taint analysis and repair is a deterministic env-hoist
+templater. There are no calls to OpenRouter, OpenAI, Anthropic, or any model
+endpoint anywhere in the code (`grep` over `ghactaint/` and `eval.py` finds no
+HTTP/API/model usage). The competition rules require, *if* the system makes model
+calls, that they go through OpenRouter with the organizer-issued team key and that
+the exact model identifier be named — this system makes none, so there is nothing
+to configure and no model identifier to name.
 
-1. **env-hoist is 36/36.** A correct deterministic templater reproduces the
-   reference strategy on every training case. The LLM is a quoting fallback,
-   not the engine. Less nondeterminism, less shared-key burn.
-2. **Patched files == sink files, always.** For cross-file flows, fix at the
-   sink *inside the action*, never at the caller's `with:` line.
+## Results (measured on disk, this codebase)
 
-## Flow model (spec — see taint.py docstring)
+Dataset: 150 train samples (31 vulnerable, 20.7%), 62 gold flows; 75 validation
+samples.
 
-- **ROOT** — every direct interpolation of an untrusted `github.*` context starts
-  its own flow. Evidence: one sample has 8 flows from 8 independent
-  interpolations across different jobs.
-- **FROM** — the `with:` key line (cross-component) or the `run:` line (inline).
-  Evidence: sample `63dd9558` reports `:16` and `:17`, two adjacent `with:` keys.
-- **TO** — first `run:` shell command the value reaches.
-- **Task 1 reports first sinks only; Task 2 patches every consumption point.**
-  Evidence: `tj-actions/branch-names` reports **1** vuln at `:42` while its
-  reference patch touches **3** steps. `Result.flows` vs `Result.consumptions`
-  encode exactly this split.
+### Detection — train (labeled)
 
-## Verification (`verify.py`)
-
-Four gates; a patch ships only if all pass:
-
-1. `git apply --check`
-2. YAML parses
-3. `actionlint` (skipped-as-pass if not installed)
-4. **re-run our own detector on the patched tree — zero flows must remain**
-
-Gate 4 is the real one and is negative-controlled in the test suite: an empty
-patch on a vulnerable sample is *rejected*, naming the surviving flow. Worth a
-paragraph in `submission.pdf`.
-
-## Status — measured on the real dataset (150 train samples)
-
-Dataset: https://github.com/XinyuZhangXvX/detect-and-fix-vulnerabilities-in-github-actions
-
-### Task 1 — detection
-
-    flow-level (strict, exact from/to lines):
-      TP=56  FP=7  FN=0    precision 0.889   recall 1.000   F1 0.941
+    flow-level (exact from/to lines):
+      TP=62  FP=0  FN=0    precision 1.000  recall 1.000  F1 1.000
     sample-level:
-      TP=29  TN=119 FP=2 FN=0   accuracy 0.987   recall 1.000
+      TP=31  TN=119  FP=0  FN=0   accuracy 1.000
+    (eval.py DIAGNOSIS: line convention consistent with gold on all matched flows)
 
-Null baseline is F1 0.000 — recall is the whole game, and no gold flow is
-missed. Strict == file-only at EVERY tolerance: every flow found on the right
-file also landed on the exact right line.
+Null baseline is F1 0.000 / accuracy 79.3%. Every gold flow is found on the exact
+gold line; every vulnerable sample is classified vulnerable, every clean sample
+clean.
 
-All 7 remaining FP flows sit in just 2 samples (63c49aca, 63c49563). Attributed
-to curation noise: 29 vulnerable samples == 29 reference patches, so the labels
-likely cover only flows with a known upstream fix. Ruled out first — the `on:`
-trigger does NOT gate labels (16 gold-vulnerable samples use plain
-`pull_request`, two with the same source as the FP).
+### Patches — apply cleanly
 
-### Task 2 — patches
+    train:      31/31 generated patches pass `git apply --check`
+    validation: 16/16 generated patches pass `git apply --check`
 
-    29/29 patches pass all 4 verification gates
-    29/29 file-set match against the organizers' reference patches
+(Validation currently reports 16 vulnerable samples / 23 flows. Before the
+boolean-sink refinement below it reported 19 vulnerable / 28 flows; three samples
+became clean when their only flows were boolean-guarded — see Limitations.)
 
-Scope follows the reference convention: files containing a reported flow sink
-are repaired, and every consumption inside such a file is neutralized. A
-CALLER's downstream re-consumption of a component's outputs is left alone —
-neutralizing the root already kills the flow. tj-actions patches action.yml
-:42/:61/:75 but not the workflow's :30/:31; 63dd950d patches only the workflow,
-because its sinks live there.
+## Approach (summary)
 
-### Resolved empirically, not guessed
+- **Detection.** Interprocedural taint from the predefined untrusted `github.*`
+  contexts (`untrusted_data.csv`) to shell sinks (`run:`), through `with:` inputs,
+  `$GITHUB_ENV`/`$GITHUB_OUTPUT`/`::set-output`, job/action outputs, and JS/Docker
+  action passthrough (endpoints stay YAML). `uses:` refs resolve to vendored
+  `actions/` and `reusable_workflows/` under the split. Sink line = the line of
+  the `${{ }}` interpolation.
+- **Repair — env-hoist.** Each untrusted `${{ }}` in a `run:` is moved to a
+  step-level `env:` entry and replaced with a quoted shell variable reference, so
+  the value is delivered through the process environment instead of being
+  substituted into the script text.
+- **Boolean-result refinement.** An untrusted ref used *only* as an argument to
+  `contains()`/`startsWith()`/`endsWith()` yields the function's boolean result,
+  never attacker text, so it is not an injection sink and is not reported.
+- **Self-verification.** Four gates: `git apply --check`, YAML parses, `actionlint`
+  (skipped-as-pass if absent), and re-running the detector on the patched tree
+  (zero flows must remain). See `verify.py`.
 
-1. **Sink-line convention = `expr`** (the line of the `${{ }}` occurrence).
-   Three-way sweep against gold: `expr` holds strict == file-only; `run-key` and
-   `step-start` collapse as tolerance tightens.
-2. **Input defaults self-taint.** A composite action whose input declares
-   `default: ${{ github.head_ref }}` taints ITSELF when the caller does not bind
-   that input. Whole FN class; invisible without the dataset.
-3. **Root vs derived reporting.** Root symbols are reported at every consumption
-   (platformsh's `inputs.ref` at :49/:51/:78/:85 = 4 flows); only values produced
-   by a step that already reported a sink collapse to the first (tj-actions).
+## Limitations (honest)
 
-### Rejected: quoted-heredoc-as-safe
+- **`63dd94ac` (validation)** still produces malformed patched YAML — its patch
+  fails verification gate 2 (YAML parse). Detection for it is unaffected; the
+  patch shape needs work.
+- **The boolean-result refinement has no train ground truth** — that shape does
+  not occur in the labeled train set, so it was verified *inert* on train (train
+  detection is unchanged at TP 62 / FP 0 / FN 0) but its correctness on unseen
+  data rests on the soundness argument (boolean output ≠ shell text), not on
+  gold labels.
 
-Treating `<<'EOF'` bodies as literal data is **unsound** — an attacker value
-containing a line equal to the delimiter closes the heredoc early and the rest
-executes (EOF breakout). Gold agrees, flagging wayou action.yml :47/:50 where
-`${{ inputs.body }}` (a multi-line issue body) sits inside `<<'EOF'`. Cost 2 TP
-to remove 1 FP (F1 0.941 -> 0.931). Reverted; `expr.literal_heredoc_spans()` and
-its tests are retained.
+## Layout
 
-### Two patch bugs caught by gate 4, not by the fixture
-
-The synthetic fixture is circular — it cannot find bugs it has no shape for.
-Re-running the detector on the patched tree found both (now regression-tested):
-
-* **63dd950d** — the file has no trailing newline and its last line IS a sink.
-  difflib's final chunk then lacks `\n`, so a naive `join()` welds the next `+`
-  onto the preceding `-` line and git rejects the patch as corrupt. Fixed by
-  emitting git's `\ No newline at end of file` marker.
-* **63dd950c** — a step written `- run: |` carries the `run:` key on the item
-  line. The `env:` block was being inserted INTO the shell script, and the step
-  indent was sniffed from the script body rather than the item.
-
-### LLM disclosure
-
-**Zero LLM calls.** The pipeline is fully deterministic: env-hoist covers 36/36
-reference patches with no exceptions, so no model is invoked at any point. No
-API key is required to run this code.
-
-## Compliance checklist
-
-- [x] OpenRouter team key — **not required**: zero LLM calls, nothing to
-      configure. If a future edge case ever needs one it is read from
-      `os.environ`, never committed.
-- [x] Private repo + read access to `XinyuZhangXvX` (post-deadline commits
-      are ignored — this had the only unrecoverable deadline)
-- [x] README — deps, repro commands, LLM disclosure (no model id: none used)
-- [ ] `submission.pdf` — approach, detection, patch, LLM/tool disclosure
-- [ ] Validation set drops **2 days** before the deadline; harness is ready:
-      `python -m ghactaint.cli --root DATASET --split validation --out .`
+```
+ghactaint/
+  cli.py        entry point -> <split>.csv + patches/
+  taint.py      taint engine (flow model + boolean-sink refinement)
+  loader.py     ruamel YAML load with exact source positions
+  expr.py       ${{ }} / context-ref scanning
+  resolver.py   uses: -> vendored action / reusable-workflow paths
+  patch.py      env-hoist unified-diff generation
+  verify.py     four-gate self-verification
+eval.py         scorer (flow-level P/R/F1 at line tolerances + sample-level)
+tests/          unit tests
+fixture/        synthetic 4-file dataset for wiring tests
+```
