@@ -44,11 +44,41 @@ def git_apply_check(root: str, diff_text: str) -> tuple[bool, str]:
         os.unlink(p)
 
 
-def apply_to_copy(root: str, diff_text: str) -> Optional[str]:
-    """Copy the tree, apply the diff, return the temp root (caller cleans up)."""
+def _read_closure(analyzer, root: str, sample_id: str, split: str, diff_text: str) -> set:
+    """Files verify needs in the temp tree: the analyzer's read-closure for this
+    sample (the workflow + its transitive `uses:` closure) plus any file the diff
+    patches. Computed read-only against the real root via a throwaway analyzer
+    clone -- all analyzer IO goes through Analyzer.doc(), which records every file
+    it reads in `_docs`, so its keys are exactly that closure."""
+    import copy as _copy
+    probe = _copy.copy(analyzer)
+    probe.root = root
+    probe._docs = {}
+    probe.analyze_sample(sample_id, split=split)
+    needed = set(probe._docs.keys())
+    for ln in diff_text.splitlines():          # belt-and-suspenders: patched files
+        if ln.startswith("+++ b/"):
+            needed.add(ln[6:].strip())
+    return needed
+
+
+def apply_to_copy(root: str, diff_text: str, needed_files) -> Optional[str]:
+    """Copy ONLY the files this sample reads (its `uses:` closure + patch targets),
+    apply the diff, return the temp root (caller cleans up).
+
+    A full-tree copytree of the ~160MB dataset ran per vulnerable sample and
+    dominated verify cost (~35s warm / 210s cold each -> ~11min for 19 samples).
+    analyze_sample and gates 2-4 only ever read the closure (all IO via
+    Analyzer.doc()), so copying just those files is verdict-equivalent."""
     tmp = tempfile.mkdtemp(prefix="ghac_verify_")
     dst = os.path.join(tmp, "tree")
-    shutil.copytree(root, dst, symlinks=True)
+    os.makedirs(dst, exist_ok=True)
+    for rel in needed_files:
+        src = os.path.join(root, rel)
+        if os.path.isfile(src):
+            d = os.path.join(dst, rel)
+            os.makedirs(os.path.dirname(d), exist_ok=True)
+            shutil.copy2(src, d)
     if diff_text.strip():
         pf = os.path.join(tmp, "p.patch")
         with open(pf, "w", encoding="utf-8", newline="") as fh:
@@ -85,7 +115,8 @@ def verify(root: str, diff_text: str, sample_id: str, analyzer, split: str = "tr
         res.errors.append(f"git apply: {err}")
         return res
 
-    tmp_root = apply_to_copy(root, diff_text)
+    needed = _read_closure(analyzer, root, sample_id, split, diff_text)
+    tmp_root = apply_to_copy(root, diff_text, needed)
     if tmp_root is None:
         res.gates["apply_to_copy"] = False
         res.errors.append("patch failed to apply to working copy")
