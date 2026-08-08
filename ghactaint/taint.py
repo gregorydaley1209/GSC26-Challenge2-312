@@ -64,6 +64,10 @@ _ENV_WRITE = re.compile(
 )
 _SET_OUTPUT = re.compile(r"""::set-output\s+name=(?P<name>[A-Za-z_][A-Za-z0-9_-]*)""")
 
+# Boolean-valued expression functions: their RESULT is true/false, so an untrusted
+# ref used ONLY as their argument never reaches the shell as attacker text.
+_BOOL_FUNC = re.compile(r"(?<![A-Za-z0-9_])(?:contains|startswith|endswith)\s*\(", re.I)
+
 
 @dataclass(frozen=True)
 class Site:
@@ -253,6 +257,37 @@ class Analyzer:
                 self._handle_uses(d, st, step_line, scope, res, split, depth, steps_out)
         return steps_out
 
+    def _boolean_only(self, ex) -> bool:
+        """True iff every untrusted ref in `ex` is used ONLY inside a
+        contains()/startsWith()/endsWith() call, so the value reaching the sink is
+        the boolean result, not attacker text. Covers `startsWith(..) && 'lit' ||
+        'lit'` (branches are literals, not refs). If any untrusted ref appears
+        outside such a call -- raw, or inside format()/toJSON()/join() etc. -- this
+        returns False and the flow is still reported (sound: we only drop when the
+        untrusted value provably cannot become shell text)."""
+        untr = [r for r in ex.refs if self.untrusted.is_untrusted(r.path)]
+        if not untr:
+            return False
+        masked = E._mask_strings(ex.text)          # neutralize '(' ')' inside string literals
+        spans = []
+        for m in _BOOL_FUNC.finditer(masked):
+            o = m.end() - 1                        # index of the '('
+            depth = 0
+            for j in range(o, len(masked)):
+                if masked[j] == "(":
+                    depth += 1
+                elif masked[j] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        spans.append((o, j))
+                        break
+        base = ex.start + 3                        # inner-text offset within the run: scalar
+        for r in untr:
+            rs, rend = r.start - base, r.end - base
+            if not any(o < rs and rend <= c for (o, c) in spans):
+                return False                       # this untrusted ref escapes the boolean call
+        return True
+
     def _handle_run(self, d: L.Doc, st, step_line, scope: "_Scope", res: Result, split: str):
         pos = d.value_pos(st, "run")
         if pos is None:
@@ -272,6 +307,10 @@ class Analyzer:
         # Empirically the rule cost 2 TP to remove 1 FP (F1 0.941 -> 0.931).
         # E.literal_heredoc_spans() is kept in expr.py for the writeup.
         evaluated = [(ex, self._eval_expr(ex, scope)) for ex in E.find_expressions(pos.text)]
+        # Drop boolean-only expressions: an untrusted ref used solely as a
+        # contains()/startsWith()/endsWith() argument yields a bool, not shell text
+        # -- not an injection sink, and its (bool) result must not propagate either.
+        evaluated = [(ex, tv) for (ex, tv) in evaluated if not self._boolean_only(ex)]
         step_reported = False
 
         for ex, tv in evaluated:
@@ -347,6 +386,8 @@ class Analyzer:
                 for ex in E.find_expressions(pos.text):
                     tv = self._eval_expr(ex, scope)
                     if not tv.sources:
+                        continue
+                    if self._boolean_only(ex):   # bound value is a bool/literal, not attacker text
                         continue
                     # FROM = the `with:` key line (confirmed: sample 63dd9558 -> :16/:17)
                     origin = tv.origin or Site(d.path, key_line, sorted(tv.sources)[0])
