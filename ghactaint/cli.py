@@ -70,7 +70,7 @@ def main(argv=None):
                         n_fail += 1
                         print(f"  ! {sid}: verify failed: {'; '.join(vr.errors)[:120]}", file=sys.stderr)
                 pf = os.path.join(a.out, "patches", f"{sid}.patch")
-                with open(pf, "w", encoding="utf-8") as fh:
+                with open(pf, "w", encoding="utf-8", newline="") as fh:
                     fh.write(diff)
                 patches = meta
         rows.append({"sample_id": sid,

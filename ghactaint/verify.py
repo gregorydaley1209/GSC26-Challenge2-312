@@ -33,7 +33,7 @@ class VerifyResult:
 def git_apply_check(root: str, diff_text: str) -> tuple[bool, str]:
     if not diff_text.strip():
         return True, ""
-    with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False, encoding="utf-8") as fh:
+    with tempfile.NamedTemporaryFile("w", suffix=".patch", delete=False, encoding="utf-8", newline="") as fh:
         fh.write(diff_text)
         p = fh.name
     try:
@@ -51,7 +51,7 @@ def apply_to_copy(root: str, diff_text: str) -> Optional[str]:
     shutil.copytree(root, dst, symlinks=True)
     if diff_text.strip():
         pf = os.path.join(tmp, "p.patch")
-        with open(pf, "w", encoding="utf-8") as fh:
+        with open(pf, "w", encoding="utf-8", newline="") as fh:
             fh.write(diff_text)
         r = subprocess.run(["git", "apply", "-p1", pf], cwd=dst,
                            capture_output=True, text=True)
