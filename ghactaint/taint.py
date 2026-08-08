@@ -415,7 +415,7 @@ class Analyzer:
                 tv = self._eval_expr(ex, empty)   # only github.* can resolve here
                 if not tv.sources:
                     continue
-                line = self._default_from_line(cd, decl, name, ex, pos)
+                line = pos.line_of_offset(ex.start)  # `default:` value position, not prose textual-match
                 origin = Site(cd.path, line, sorted(tv.sources)[0])
                 cur = bound.get(name)
                 if cur is None:
