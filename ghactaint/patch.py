@@ -270,7 +270,13 @@ class Patcher:
 
         block = [f"{step_indent}  {v}: {expr_raw}\n" for v, expr_raw, _ in mapping]
         if env_at is not None:
-            lines[env_at + 1 : env_at + 1] = block
+            # Indent the new entries to match the EXISTING env: block's own children,
+            # not step_indent+2 -- the env: may be a job/workflow-level block at a
+            # shallower depth than the step, and a mismatched indent yields invalid
+            # YAML (a key at the wrong column reads as a new mapping). Sample 63dd94ac.
+            env_indent = _indent_of(lines[env_at])
+            eblock = [f"{env_indent}  {v}: {expr_raw}\n" for v, expr_raw, _ in mapping]
+            lines[env_at + 1 : env_at + 1] = eblock
         elif inline_run:
             # `run:` is on the item line, so env: cannot precede it. Append the
             # block after the step's last line instead (trailing blanks trimmed),
