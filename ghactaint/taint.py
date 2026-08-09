@@ -424,13 +424,20 @@ class Analyzer:
         bound: Dict[str, TaintValue] = {}
         with_map = node.get("with")
         if isinstance(with_map, dict) and scope is not None:
+            # env: -> with: edge is cut. `with:` bindings do NOT inherit taint from
+            # env vars (gold does not trace that hop -- e.g. 63dd94c13's job-level
+            # env COMPONENT_BRANCH_NAME=${{ github.head_ref }} feeding the folded
+            # build-preview-command with:, whose :51 sink gold treats as a FP). Only
+            # env is emptied here: direct github.* and steps/needs/inputs refs still
+            # resolve, and env: -> run: sinks are unaffected (evaluated in _handle_run).
+            with_scope = _Scope(env={}, steps=scope.steps, needs=scope.needs, inputs=scope.inputs)
             for k in with_map:
                 pos = d.value_pos(with_map, k)
                 if pos is None:
                     continue
                 key_line = d.key_line(with_map, k) or pos.line
                 for ex in E.find_expressions(pos.text):
-                    tv = self._eval_expr(ex, scope)
+                    tv = self._eval_expr(ex, with_scope)
                     if not tv.sources:
                         continue
                     if self._boolean_only(ex):   # bound value is a bool/literal, not attacker text
