@@ -77,15 +77,16 @@ samples.
 ### Detection — train (labeled)
 
     flow-level (exact from/to lines; identical at file-level, tol=0..inf):
-      TP=56  FP=6  FN=0    precision 0.903  recall 1.000  F1 0.949
+      TP=56  FP=5  FN=0    precision 0.918  recall 1.000  F1 0.957
     sample-level:
-      TP=29  TN=119  FP=2  FN=0   accuracy 0.987  precision 0.935  recall 1.000  F1 0.967
-    (eval.py DIAGNOSIS: line convention consistent with gold on all matched flows)
+      TP=29  TN=120  FP=1  FN=0   accuracy 0.993  precision 0.967  recall 1.000  F1 0.983
+    (eval.py DIAGNOSIS: line convention consistent with gold on all matched flows;
+     eval header: 56 gold / 61 pred flows)
 
 Null baseline is F1 0.000 / accuracy 80.7%. Recall is 1.000 — every gold flow is
-found on the exact gold line, no flow missed (FN 0). Precision is not perfect: 6
-spurious flows across 2 otherwise-clean samples (sample-level FP 2). Both are
-identified false positives, characterized below under Limitations.
+found on the exact gold line, no flow missed (FN 0). Precision is not perfect: 5
+spurious flows in 1 otherwise-clean sample (sample-level FP 1). That false
+positive is identified and characterized below under Limitations.
 
 ### Patches — apply cleanly
 
@@ -111,33 +112,55 @@ became clean when their only flows were boolean-guarded — see Limitations.)
 - **Boolean-result refinement.** An untrusted ref used *only* as an argument to
   `contains()`/`startsWith()`/`endsWith()` yields the function's boolean result,
   never attacker text, so it is not an injection sink and is not reported.
-- **Input-default source line.** When a composite-action input self-taints via its
-  own `default: ${{ github.* }}`, the flow's `from` is placed on the first line of
-  the input's declaration block that textually mentions the context path — which is
-  gold's convention (e.g. platformsh `action.yaml:9`, the `description:` prose
-  "...Default of {github.head_ref}", not the `default:` value line `:11`). A prior
-  variant that used the `default:` value line was measured against the current
-  dataset (4 platformsh flows landed on `:11`, producing 4 FP + 4 FN) and reverted.
+- **Sanitized-heredoc refinement (scoping decision).** A single-quoted heredoc body
+  (`<<'EOF'`/`<<"EOF"`) is flagged by default — an attacker value containing a line
+  equal to the delimiter closes it early and the rest executes (EOF-breakout). An
+  interpolation inside such a body is suppressed **only when the opening line has
+  BOTH** a single-line reducer (`awk 'NR==1'` / `head -1` / `sed -n '1p'`, which
+  makes EOF-breakout impossible) **and** a `sed` that escapes a shell metacharacter
+  (backtick, `$`, or a quote, which neutralizes `$()`/backtick/quote injection).
+  *Evidence:* a naive "quoted-heredoc = safe" rule was measured and rejected because
+  it cost the two `wayou action.yml:47/:50` gold TPs (heredoc redirected to a file,
+  no sanitizer); requiring both sanitizers removes the slack `63c49563` false
+  positive while keeping those two TPs. Verified on train: it removes exactly the
+  one slack false positive with no TP lost (5 FP remain).
+- **`env:` → `with:` scoping decision.** Taint is **not** propagated from an `env:`
+  block into a `with:` input binding — `with:` values are evaluated under an
+  env-emptied scope. This matches the reference flow model's observed propagation
+  depth (direct `github.*`-in-`with:` and `steps`/`needs`/`inputs` bindings still
+  taint; `env:` → `run:` sink tracing is unaffected). *Honesty note:* a value that
+  reaches a shell via `env:` → `with:` → `inputs.*` **is** semantically injectable —
+  this is deliberate alignment with what the reference model labels, **not** a claim
+  that such flows are safe. *Evidence:* provably inert on the labelled train set (no
+  train flow routes `env:` → `with:`; all `env.` refs there are trusted vars such as
+  `TAG_NAME`), and it removes the `63dd94c13` `wf:19 → action.yml:51` validation FP
+  while keeping the direct `action.yml:47` flow.
+- **Input-default source line (scoping decision).** When a composite-action input
+  self-taints via its own `default: ${{ github.* }}`, the flow's `from` is placed on
+  the first line of the input's declaration block that textually mentions the context
+  path — gold's convention (e.g. platformsh `action.yaml:9`, the `description:` prose
+  "...Default of {github.head_ref}", not the `default:` value line `:11`). *Evidence:*
+  a variant using the `default:` value line was measured against the current dataset
+  (4 platformsh flows landed on `:11`, producing 4 FP + 4 FN) and reverted. That
+  variant had originally scored better against a *superseded* `train.csv` whose
+  platformsh gold sat at `:11`, which explains the earlier discrepancy — the
+  convention is dataset-dependent, so it is stated as a measured comparison, not a
+  universal rule.
 - **Self-verification.** Four gates: `git apply --check`, YAML parses, `actionlint`
   (skipped-as-pass if absent), and re-running the detector on the patched tree
   (zero flows must remain). See `verify.py`.
 
 ## Limitations (honest)
 
-- **Two known detection false positives (6 flows across 2 samples; precision 0.903).**
+- **One known detection false positive (5 flows in 1 sample; precision 0.918).**
   - `63c49aca` (yykamei/actions-git-push, 5 flows): `github.event.pull_request.head.ref`
     is bound to `inputs.branch` and reaches `git pull`/`checkout`/`push`, used as a
     git-ref argument and single-quoted at 4 of the 5 sites. Gold labels the sample
     clean; the engine reports it because it models neither git-ref argument context
     nor the single-quoting.
-  - `63c49563` (WordPress slack-notifications, 1 flow at :138):
-    `github.event.head_commit.message` sits inside a `<<'EOF'` single-quoted heredoc
-    and is then `sed`-escaped (backticks, quotes, `$`). Gold labels it clean; the
-    engine reports it because it treats quoted heredocs as unsafe (EOF-breakout is
-    real in general) and does not model the downstream `sed` sanitization.
 - **The boolean-result refinement has no train ground truth** — that shape does
   not occur in the labeled train set, so it was verified *inert* on train (train
-  detection is unchanged at TP 56 / FP 6 / FN 0) but its correctness on unseen
+  detection is unchanged at TP 56 / FP 5 / FN 0) but its correctness on unseen
   data rests on the soundness argument (boolean output ≠ shell text), not on
   gold labels.
 
