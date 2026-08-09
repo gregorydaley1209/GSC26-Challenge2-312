@@ -71,20 +71,21 @@ to configure and no model identifier to name.
 
 ## Results (measured on disk, this codebase)
 
-Dataset: 150 train samples (31 vulnerable, 20.7%), 62 gold flows; 75 validation
+Dataset: 150 train samples (29 vulnerable, 19.3%), 56 gold flows; 75 validation
 samples.
 
 ### Detection — train (labeled)
 
-    flow-level (exact from/to lines):
-      TP=62  FP=0  FN=0    precision 1.000  recall 1.000  F1 1.000
+    flow-level (exact from/to lines; identical at file-level, tol=0..inf):
+      TP=56  FP=6  FN=0    precision 0.903  recall 1.000  F1 0.949
     sample-level:
-      TP=31  TN=119  FP=0  FN=0   accuracy 1.000
+      TP=29  TN=119  FP=2  FN=0   accuracy 0.987  precision 0.935  recall 1.000  F1 0.967
     (eval.py DIAGNOSIS: line convention consistent with gold on all matched flows)
 
-Null baseline is F1 0.000 / accuracy 79.3%. Every gold flow is found on the exact
-gold line; every vulnerable sample is classified vulnerable, every clean sample
-clean.
+Null baseline is F1 0.000 / accuracy 80.7%. Recall is 1.000 — every gold flow is
+found on the exact gold line, no flow missed (FN 0). Precision is not perfect: 6
+spurious flows across 2 otherwise-clean samples (sample-level FP 2). Both are
+identified false positives, characterized below under Limitations.
 
 ### Patches — apply cleanly
 
@@ -110,18 +111,33 @@ became clean when their only flows were boolean-guarded — see Limitations.)
 - **Boolean-result refinement.** An untrusted ref used *only* as an argument to
   `contains()`/`startsWith()`/`endsWith()` yields the function's boolean result,
   never attacker text, so it is not an injection sink and is not reported.
+- **Input-default source line.** When a composite-action input self-taints via its
+  own `default: ${{ github.* }}`, the flow's `from` is placed on the first line of
+  the input's declaration block that textually mentions the context path — which is
+  gold's convention (e.g. platformsh `action.yaml:9`, the `description:` prose
+  "...Default of {github.head_ref}", not the `default:` value line `:11`). A prior
+  variant that used the `default:` value line was measured against the current
+  dataset (4 platformsh flows landed on `:11`, producing 4 FP + 4 FN) and reverted.
 - **Self-verification.** Four gates: `git apply --check`, YAML parses, `actionlint`
   (skipped-as-pass if absent), and re-running the detector on the patched tree
   (zero flows must remain). See `verify.py`.
 
 ## Limitations (honest)
 
-- **`63dd94ac` (validation)** still produces malformed patched YAML — its patch
-  fails verification gate 2 (YAML parse). Detection for it is unaffected; the
-  patch shape needs work.
+- **Two known detection false positives (6 flows across 2 samples; precision 0.903).**
+  - `63c49aca` (yykamei/actions-git-push, 5 flows): `github.event.pull_request.head.ref`
+    is bound to `inputs.branch` and reaches `git pull`/`checkout`/`push`, used as a
+    git-ref argument and single-quoted at 4 of the 5 sites. Gold labels the sample
+    clean; the engine reports it because it models neither git-ref argument context
+    nor the single-quoting.
+  - `63c49563` (WordPress slack-notifications, 1 flow at :138):
+    `github.event.head_commit.message` sits inside a `<<'EOF'` single-quoted heredoc
+    and is then `sed`-escaped (backticks, quotes, `$`). Gold labels it clean; the
+    engine reports it because it treats quoted heredocs as unsafe (EOF-breakout is
+    real in general) and does not model the downstream `sed` sanitization.
 - **The boolean-result refinement has no train ground truth** — that shape does
   not occur in the labeled train set, so it was verified *inert* on train (train
-  detection is unchanged at TP 62 / FP 0 / FN 0) but its correctness on unseen
+  detection is unchanged at TP 56 / FP 6 / FN 0) but its correctness on unseen
   data rests on the soundness argument (boolean output ≠ shell text), not on
   gold labels.
 
