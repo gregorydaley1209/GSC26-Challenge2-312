@@ -68,6 +68,45 @@ _SET_OUTPUT = re.compile(r"""::set-output\s+name=(?P<name>[A-Za-z_][A-Za-z0-9_-]
 # ref used ONLY as their argument never reaches the shell as attacker text.
 _BOOL_FUNC = re.compile(r"(?<![A-Za-z0-9_])(?:contains|startswith|endswith)\s*\(", re.I)
 
+# Sanitized quoted-heredoc detection. A single-quoted heredoc body (<<'EOF'/<<"EOF")
+# is normally NOT safe -- an attacker value containing a line equal to the delimiter
+# closes it early and the rest executes (EOF-breakout), so the default flags it. But
+# when the opening line ALSO reduces the captured output to a single line
+# (awk 'NR==1' / head -1 / sed -n '1p'), EOF-breakout is impossible, AND a sed that
+# escapes a shell metacharacter (backtick, $, or a quote) neutralizes $()/backtick/
+# quote injection -- so an interpolation in that body can no longer reach the shell
+# as code. Both conditions are required, keeping this narrow to the "reduce-to-one-
+# line-and-escape" idiom (train sample 63c49563). See _sanitized_heredoc_spans.
+_HD_SINGLE_LINE = re.compile(r"""awk\s+["']NR\s*==\s*1["']|head\s+-n?\s*1(?![0-9])|sed\s+-n\s+["']1p["']""")
+_HD_SED_ESCAPE = re.compile(r"""sed[^|\n]*s/\\?[`$"']""")
+
+
+def _heredoc_is_sanitized(open_line: str) -> bool:
+    return bool(_HD_SINGLE_LINE.search(open_line) and _HD_SED_ESCAPE.search(open_line))
+
+
+def _sanitized_heredoc_spans(text: str):
+    """Char-offset spans of quoted-heredoc bodies whose opening line sanitizes the
+    captured output (single-line reduction + sed metachar-escape). Reuses expr._HEREDOC."""
+    spans, off, pending = [], 0, None
+    for line in text.split("\n"):
+        if pending is None:
+            m = E._HEREDOC.search(line)
+            if m and (m.group("qd") or m.group("bd")):
+                pending = (m.group("qd") or m.group("bd"), off + len(line) + 1, line)
+        else:
+            delim, start, open_line = pending
+            if line.strip() == delim:
+                if _heredoc_is_sanitized(open_line):
+                    spans.append((start, off))
+                pending = None
+        off += len(line) + 1
+    if pending:
+        delim, start, open_line = pending
+        if _heredoc_is_sanitized(open_line):
+            spans.append((start, len(text)))
+    return spans
+
 
 @dataclass(frozen=True)
 class Site:
@@ -311,6 +350,13 @@ class Analyzer:
         # contains()/startsWith()/endsWith() argument yields a bool, not shell text
         # -- not an injection sink, and its (bool) result must not propagate either.
         evaluated = [(ex, tv) for (ex, tv) in evaluated if not self._boolean_only(ex)]
+        # Drop interpolations inside a sanitized single-quoted heredoc (single-line
+        # reduction + sed metachar-escape on the opening line) -- the value cannot
+        # reach the shell as code. Narrow: requires BOTH sanitizers. See module top.
+        san = _sanitized_heredoc_spans(pos.text)
+        if san:
+            evaluated = [(ex, tv) for (ex, tv) in evaluated
+                         if not any(a <= ex.start < b for (a, b) in san)]
         step_reported = False
 
         for ex, tv in evaluated:
